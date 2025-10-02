@@ -12,11 +12,20 @@
 #include <random>
 
 
+// 1表示开启，0表示关闭
+#define ENABLE_REAL_TIME_VIS 0    
+#define ENABLE_FINAL_VIS 0        
+#define ENABLE_RESIDUAL_ANALYSIS 0
+#define ENABLE_LOG 0              
+
+
+
 struct TrajectoryData {
     double t;  
     double x;  
     double y;  
 };
+
 
 template <typename T>
 void ProjectileModel(T t, T x0, T y0, T v0, T theta, T g, T k, T& x_pred, T& y_pred, bool invert_y = true) {
@@ -70,17 +79,28 @@ std::vector<TrajectoryData> extractTrajectory(const std::string& video_path,
     std::vector<TrajectoryData> trajectory;
     cv::VideoCapture cap(video_path);
     if (!cap.isOpened()) {
+#if ENABLE_LOG
         LOG(FATAL) << "无法打开视频文件: " << video_path;
+#else
+        std::cerr << "无法打开视频文件: " << video_path << std::endl;
+        exit(-1);
+#endif
     }
 
     const double fps = cap.get(cv::CAP_PROP_FPS);
     const int frame_count = cap.get(cv::CAP_PROP_FRAME_COUNT);
+#if ENABLE_LOG
     LOG(INFO) << "视频信息: FPS=" << fps << ", 总帧数=" << frame_count;
+#endif
 
     cv::Mat frame, gray, blurred;
     int frame_idx = 0;
     const int min_radius = circle_size_range.width;
     const int max_radius = circle_size_range.height;
+
+#if ENABLE_REAL_TIME_VIS
+    cv::namedWindow("Projectile Tracking", cv::WINDOW_NORMAL);
+#endif
 
     
     while (cap.read(frame)) {
@@ -98,27 +118,35 @@ std::vector<TrajectoryData> extractTrajectory(const std::string& video_path,
             double t = frame_idx / fps;
             trajectory.push_back({t, center.x, center.y});
 
+#if ENABLE_REAL_TIME_VIS
             
             cv::circle(frame, center, circle[2], cv::Scalar(0, 255, 0), 2);
             cv::circle(frame, center, 2, cv::Scalar(0, 0, 255), -1);
+#endif
         }
 
+#if ENABLE_REAL_TIME_VIS
         cv::imshow("Projectile Tracking", frame);
         if (cv::waitKey(5) == 27) break;
+#endif
 
         frame_idx++;
     }
 
     cap.release();
-    cv::destroyAllWindows();
+#if ENABLE_REAL_TIME_VIS
+    cv::destroyWindow("Projectile Tracking");
+#endif
 
-   
+    
     std::sort(trajectory.begin(), trajectory.end(), 
               [](const TrajectoryData& a, const TrajectoryData& b) {
                   return a.t < b.t;
               });
 
+#if ENABLE_LOG
     LOG(INFO) << "原始轨迹点数量: " << trajectory.size();
+#endif
 
     
     if (interpolate && trajectory.size() > 2) {
@@ -147,11 +175,18 @@ std::vector<TrajectoryData> extractTrajectory(const std::string& video_path,
         
         interpolated.push_back(trajectory.back());
         trajectory = interpolated;
+#if ENABLE_LOG
         LOG(INFO) << "插值后轨迹点数量: " << trajectory.size();
+#endif
     }
 
     if (trajectory.size() < 20) {
+#if ENABLE_LOG
         LOG(FATAL) << "轨迹点数量不足（需≥20），无法进行高精度拟合";
+#else
+        std::cerr << "轨迹点数量不足（需≥20），无法进行高精度拟合" << std::endl;
+        exit(-1);
+#endif
     }
     return trajectory;
 }
@@ -162,7 +197,7 @@ void multiStartOptimization(const std::vector<TrajectoryData>& trajectory,
                            double& v0, double& theta, double& g, double& k,
                            const double estimated_min_g = 100.0,  
                            const double estimated_max_g = 1000.0) {  
-  
+    
     std::vector<std::tuple<double, double, double, double>> initial_guesses;
     
     if (trajectory.size() > 4) {
@@ -192,7 +227,7 @@ void multiStartOptimization(const std::vector<TrajectoryData>& trajectory,
             }
         }
     } else {
-       
+        
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<> v_dist(50.0, 500.0);         
@@ -239,7 +274,7 @@ void multiStartOptimization(const std::vector<TrajectoryData>& trajectory,
         problem.SetParameterLowerBound(&curr_k, 0, 1e-6);
         problem.SetParameterUpperBound(&curr_k, 0, 0.25);
 
-       
+        
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::DENSE_QR;
         options.max_num_iterations = 200;
@@ -262,8 +297,10 @@ void multiStartOptimization(const std::vector<TrajectoryData>& trajectory,
     theta = best_theta;
     g = best_g;
     k = best_k;
+#if ENABLE_LOG
     LOG(INFO) << "多初始值优化完成: 最优v0=" << v0 
               << ", 角度=" << theta*180/M_PI << "度, g=" << g << ", k=" << k;
+#endif
 }
 
 
@@ -289,6 +326,7 @@ void analyzeAndVisualize(const std::vector<TrajectoryData>& trajectory,
         residuals.push_back(sqrt(pow(data.x - x_p, 2) + pow(data.y - y_p, 2)));
     }
 
+#if ENABLE_RESIDUAL_ANALYSIS
     
     double mean_res = std::accumulate(residuals.begin(), residuals.end(), 0.0) / residuals.size();
     double max_res = *std::max_element(residuals.begin(), residuals.end());
@@ -298,15 +336,17 @@ void analyzeAndVisualize(const std::vector<TrajectoryData>& trajectory,
     std::cout << "残差标准差: " << std::fixed << std::setprecision(4) 
               << sqrt(std::inner_product(residuals.begin(), residuals.end(), residuals.begin(), 0.0) 
                       / residuals.size() - mean_res*mean_res) << " 像素" << std::endl;
+#endif
 
-   
+#if ENABLE_FINAL_VIS
+    
     double x_min = *std::min_element(x_obs.begin(), x_obs.end()) - 50;
     double x_max = *std::max_element(x_obs.begin(), x_obs.end()) + 50;
     double y_min = *std::min_element(y_obs.begin(), y_obs.end()) - 50;
     double y_max = *std::max_element(y_obs.begin(), y_obs.end()) + 50;
     cv::Mat canvas(cv::Size(x_max - x_min, y_max - y_min), CV_8UC3, cv::Scalar(255, 255, 255));
 
-   
+    
     for (size_t i = 0; i < x_obs.size(); i++) {
         cv::Point pt_obs(x_obs[i] - x_min, y_obs[i] - y_min);
         cv::circle(canvas, pt_obs, 2, cv::Scalar(255, 0, 0), -1);
@@ -338,20 +378,27 @@ void analyzeAndVisualize(const std::vector<TrajectoryData>& trajectory,
     cv::imshow("观测轨迹 vs 预测轨迹", canvas);
     cv::waitKey(0);
     cv::destroyWindow("观测轨迹 vs 预测轨迹");
+#if ENABLE_LOG
     LOG(INFO) << "轨迹对比图已保存至: " << save_path;
-}
+#endif
+#endif  
+}  
 
 int main(int argc, char**argv) {
     google::InitGoogleLogging(argv[0]);
     google::SetLogDestination(google::GLOG_INFO, "trajectory_optimization.log");
 
     if (argc != 2) {
+#if ENABLE_LOG
         LOG(FATAL) << "使用方法: " << argv[0] << " [视频文件路径]";
+#else
+        std::cerr << "使用方法: " << argv[0] << " [视频文件路径]" << std::endl;
         return -1;
+#endif
     }
 
     
-    const cv::Size circle_size_range(3, 20);  
+    const cv::Size circle_size_range(3, 20); 
     const double estimated_min_g = 100.0;     
     const double estimated_max_g = 1000.0;    
 
@@ -359,9 +406,11 @@ int main(int argc, char**argv) {
     auto start_time = std::chrono::steady_clock::now();
     std::vector<TrajectoryData> trajectory = extractTrajectory(argv[1], circle_size_range, true);
     auto end_time = std::chrono::steady_clock::now();
+#if ENABLE_LOG
     LOG(INFO) << "轨迹提取耗时: " 
               << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
               << "ms";
+#endif
 
     
     double x0 = trajectory[0].x;
@@ -369,7 +418,7 @@ int main(int argc, char**argv) {
     double v0 = 150.0;        
     double theta = M_PI/4;    
     double g = 500.0;         
-    double k = 0.05;          
+    double k = 0.05;         
 
     
     multiStartOptimization(trajectory, x0, y0, v0, theta, g, k, estimated_min_g, estimated_max_g);
@@ -421,5 +470,3 @@ int main(int argc, char**argv) {
 
     return 0;
 }
-    
-    
